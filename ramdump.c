@@ -34,6 +34,194 @@ static int nodes;
 static char *user_elf = NULL;
 static char elf_default[] = "/var/tmp/ramdump_elf_XXXXXX";
 
+#ifdef ARM64
+struct unisoc_cpu_regs {
+	struct arm64_pt_regs regs;
+	char lr_symbol[128];
+	ulong lr_offset;
+	unsigned int symbol_matches;
+	int valid;
+};
+
+static struct unisoc_cpu_regs *unisoc_regs;
+static int unisoc_regs_count;
+static int unisoc_regs_loaded;
+
+static void
+parse_unisoc_reg_values(char *line, struct arm64_pt_regs *regs)
+{
+	char *p = line;
+
+	while ((p = strchr(p, 'x'))) {
+		char *end;
+		long regno = strtol(p + 1, &end, 10);
+		ulong value;
+
+		if (end == p + 1 || regno < 0 || regno > 29) {
+			p++;
+			continue;
+		}
+
+		while (whitespace(*end))
+			end++;
+		if (*end++ != ':') {
+			p++;
+			continue;
+		}
+		while (whitespace(*end))
+			end++;
+
+		value = strtoul(end, &p, 16);
+		regs->regs[regno] = value;
+	}
+}
+
+static void
+parse_unisoc_lr(char *line, struct unisoc_cpu_regs *cpu_regs)
+{
+	char *name = line + strlen("lr : ");
+	char *plus = strchr(name, '+');
+	size_t len;
+
+	if (!plus)
+		return;
+
+	len = plus - name;
+	if (len >= sizeof(cpu_regs->lr_symbol))
+		return;
+
+	memcpy(cpu_regs->lr_symbol, name, len);
+	cpu_regs->lr_symbol[len] = '\0';
+	cpu_regs->lr_offset = strtoul(plus + 1, NULL, 0);
+}
+
+static void
+check_unisoc_stack_symbol(char *line, struct unisoc_cpu_regs *cpu_regs)
+{
+	char name[128];
+	struct syment *sp;
+	ulong address, offset;
+
+	if (sscanf(line, "[<%lx>] (%127[^+]+0x%lx/", &address, name,
+	    &offset) != 3)
+		return;
+
+	if ((sp = symbol_search(name)) && sp->value + offset == address)
+		cpu_regs->symbol_matches++;
+}
+
+static void
+load_unisoc_stack_regs(void)
+{
+	char *path, *slash;
+	size_t dirlen;
+	FILE *file;
+	char line[512];
+	int cpu = -1;
+	int compatible = 0;
+	int in_regs = FALSE;
+
+	unisoc_regs_loaded = TRUE;
+	if (!machine_type("ARM64") || !nodes || kt->cpus <= 0)
+		return;
+
+	slash = strrchr(ramdump[0].path, '/');
+	dirlen = slash ? (size_t)(slash - ramdump[0].path + 1) : 0;
+	path = malloc(dirlen + strlen("extend_stack_regs") + 1);
+	if (!path)
+		error(FATAL, "cannot allocate Unisoc stack register path\n");
+	if (dirlen)
+		memcpy(path, ramdump[0].path, dirlen);
+	strcpy(path + dirlen, "extend_stack_regs");
+
+	file = fopen(path, "r");
+	free(path);
+	if (!file)
+		return;
+
+	unisoc_regs_count = kt->cpus;
+	unisoc_regs = calloc((size_t)unisoc_regs_count, sizeof(*unisoc_regs));
+	if (!unisoc_regs)
+		error(FATAL, "cannot allocate Unisoc stack registers\n");
+
+	while (fgets(line, sizeof(line), file)) {
+		int parsed_cpu;
+		ulong value1, value2;
+
+		if (strstr(line, " regs info-----") &&
+		    sscanf(line, "-----cpu%d", &parsed_cpu) == 1) {
+			cpu = parsed_cpu;
+			in_regs = cpu >= 0 && cpu < unisoc_regs_count;
+			continue;
+		}
+		if (strstr(line, " stack info-----") &&
+		    sscanf(line, "-----cpu%d", &parsed_cpu) == 1) {
+			cpu = parsed_cpu;
+			in_regs = FALSE;
+			continue;
+		}
+		if (cpu < 0 || cpu >= unisoc_regs_count)
+			continue;
+
+		if (!in_regs && !unisoc_regs[cpu].regs.pc &&
+		    sscanf(line, "[<%lx>]", &value1) == 1) {
+			unisoc_regs[cpu].regs.pc = value1;
+			check_unisoc_stack_symbol(line, &unisoc_regs[cpu]);
+			continue;
+		}
+		if (!in_regs) {
+			check_unisoc_stack_symbol(line, &unisoc_regs[cpu]);
+			continue;
+		}
+
+		if (STRNEQ(line, "lr : ")) {
+			parse_unisoc_lr(line, &unisoc_regs[cpu]);
+		} else if (sscanf(line, "sp : %lx pstate : %lx", &value1,
+			   &value2) == 2) {
+			unisoc_regs[cpu].regs.sp = value1;
+			unisoc_regs[cpu].regs.pstate = value2;
+			unisoc_regs[cpu].valid = TRUE;
+		} else {
+			parse_unisoc_reg_values(line, &unisoc_regs[cpu].regs);
+		}
+	}
+
+	fclose(file);
+	for (cpu = 0; cpu < unisoc_regs_count; cpu++) {
+		if (unisoc_regs[cpu].valid && unisoc_regs[cpu].symbol_matches)
+			compatible++;
+	}
+	if (!compatible)
+		error(WARNING,
+		    "ignoring extend_stack_regs: addresses do not match vmlinux\n");
+}
+
+int
+ramdump_get_unisoc_regs(int cpu, struct arm64_pt_regs *regs)
+{
+	struct syment *sp;
+
+	if (!unisoc_regs_loaded)
+		load_unisoc_stack_regs();
+	if (!unisoc_regs || cpu < 0 || cpu >= unisoc_regs_count ||
+	    !unisoc_regs[cpu].valid || !unisoc_regs[cpu].symbol_matches)
+		return FALSE;
+
+	*regs = unisoc_regs[cpu].regs;
+	if (unisoc_regs[cpu].lr_symbol[0] &&
+	    (sp = symbol_search(unisoc_regs[cpu].lr_symbol)))
+		regs->regs[30] = sp->value + unisoc_regs[cpu].lr_offset;
+
+	return TRUE;
+}
+#else
+int
+ramdump_get_unisoc_regs(int cpu, struct arm64_pt_regs *regs)
+{
+	return FALSE;
+}
+#endif
+
 static void alloc_elf_header(Elf64_Ehdr *ehdr, ushort e_machine)
 {
 	memcpy(ehdr->e_ident, ELFMAG, SELFMAG);
@@ -304,6 +492,9 @@ void ramdump_elf_output_file(char *opt)
 
 void ramdump_cleanup(void)
 {
+#ifdef ARM64
+	free(unisoc_regs);
+#endif
 	if (!user_elf)
 		unlink(elf_default);
 }

@@ -7532,6 +7532,7 @@ char *ramdump_to_elf(void);
 void ramdump_elf_output_file(char *opt);
 void ramdump_cleanup(void);
 int read_ramdump(int fd, void *bufptr, int cnt, ulong addr, physaddr_t paddr);
+int ramdump_get_unisoc_regs(int cpu, struct arm64_pt_regs *regs);
 void show_ramdump_files(void);
 void dump_ramdump_data(void);
 int is_ramdump_image(void);
