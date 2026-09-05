@@ -5078,12 +5078,6 @@ arm64_get_crash_notes(void)
 					note = netdump_get_prstatus_percpu(i);
 
 				if (!note) {
-					if (is_ramdump_image() &&
-					    ramdump_get_unisoc_regs(i,
-						&ms->panic_task_regs[i])) {
-						found++;
-						continue;
-					}
 					error(WARNING, "cpu %d: cannot find NT_PRSTATUS note\n", i);
 					continue;
 				}
