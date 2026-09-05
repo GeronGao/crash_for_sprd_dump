@@ -92,6 +92,7 @@ static void arm64_set_overflow_stack(struct bt_info *);
 static void arm64_set_process_stack(struct bt_info *);
 static int arm64_get_kvaddr_ranges(struct vaddr_range *);
 static void arm64_get_crash_notes(void);
+static int arm64_valid_config_va_bits(ulong);
 static void arm64_calc_VA_BITS(void);
 static int arm64_is_uvaddr(ulong, struct task_context *);
 static void arm64_calc_KERNELPACMASK(void);
@@ -5366,6 +5367,22 @@ arm64_set_va_bits_by_tcr(void)
 	return FALSE;
 }
 
+static int
+arm64_valid_config_va_bits(ulong va_bits)
+{
+	switch (machdep->pagesize) {
+	case 4096:
+		return va_bits == 39 || va_bits == 48 || va_bits == 52;
+	case 16384:
+		return va_bits == 36 || va_bits == 47 ||
+		       va_bits == 48 || va_bits == 52;
+	case 65536:
+		return va_bits == 42 || va_bits == 48 || va_bits == 52;
+	}
+
+	return FALSE;
+}
+
 static void 
 arm64_calc_VA_BITS(void)
 {
@@ -5439,7 +5456,23 @@ arm64_calc_VA_BITS(void)
 
 	for (bitval = highest_bit_long(value); bitval; bitval--) {
 		if ((value & (1UL << bitval)) == 0) {
-			if (machdep->flags & NEW_VMEMMAP)
+			/*
+			 * Since Linux 6.0, vabits_actual may be a build-time constant
+			 * and therefore have no symbol.  With the flipped VA layout,
+			 * the old calculation can produce a VA width which is invalid
+			 * for the configured page size.  In that unambiguous case, the
+			 * sign bit is one position above the first clear bit found in a
+			 * kernel symbol address.
+			 */
+			if ((machdep->flags & NEW_VMEMMAP) &&
+			    !arm64_valid_config_va_bits(bitval + 1) &&
+			    arm64_valid_config_va_bits(bitval + 2)) {
+				machdep->machspec->VA_BITS = bitval + 2;
+				machdep->machspec->VA_BITS_ACTUAL = bitval + 2;
+				machdep->machspec->VA_START =
+					_VA_START(machdep->machspec->VA_BITS_ACTUAL);
+				machdep->flags |= FLIPPED_VM;
+			} else if (machdep->flags & NEW_VMEMMAP)
 				machdep->machspec->VA_BITS = bitval + 1;
 			else
 				machdep->machspec->VA_BITS = bitval + 2;
@@ -5674,5 +5707,3 @@ out:
 }
 
 #endif  /* ARM64 */
-
-
