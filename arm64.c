@@ -1553,7 +1553,8 @@ arm64_parse_cmdline_args(void)
 	}
 }
 
-#define	MIN_KIMG_ALIGN	(0x00200000)	/* kimage load address must be aligned 2M */
+#define	MIN_KIMG_ALIGN		(0x00200000)
+#define	FALLBACK_KIMG_ALIGN	(0x00010000)
 /*
  * Traverse the entire dumpfile to find/verify kimage_voffset.
  */
@@ -1583,8 +1584,37 @@ arm64_search_for_kimage_voffset(ulong phys_base)
 		}
 	}
 
-	if (kimage_load_addr > phys_end)
-		return FALSE;
+	if (kimage_load_addr > phys_end) {
+		/*
+		 * Although the arm64 boot protocol requires a 2MB-aligned Image,
+		 * some bootloaders load it at a 64KB-aligned address.  Keep the
+		 * fast compliant search above and only use the finer scan as a
+		 * fallback.
+		 */
+		for (kimage_load_addr = roundup(phys_base, FALLBACK_KIMG_ALIGN);
+		    kimage_load_addr <= phys_end;
+		    kimage_load_addr += FALLBACK_KIMG_ALIGN) {
+			if (!(kimage_load_addr % MIN_KIMG_ALIGN))
+				continue;
+
+			ms->kimage_voffset =
+				ms->vmalloc_start_addr - kimage_load_addr;
+
+			if ((kt->flags2 & KASLR) && (kt->flags & RELOC_SET))
+				ms->kimage_voffset += (kt->relocate * -1);
+
+			if (verify_kimage_voffset()) {
+				if (CRASHDEBUG(1))
+					error(INFO,
+					    "dumpfile searched for misaligned kimage_voffset: %lx\n\n",
+					    ms->kimage_voffset);
+				break;
+			}
+		}
+
+		if (kimage_load_addr > phys_end)
+			return FALSE;
+	}
 
 	return TRUE;
 }
