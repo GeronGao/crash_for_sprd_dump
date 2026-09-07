@@ -12089,10 +12089,12 @@ vmcoreinfo_read_from_memory(const char *key)
 
 	buf = value_string = NULL;
 
-	if (!(pc->flags & GDB_INIT)) {
+	if (!(pc->flags & GDB_INIT) ||
+	    !kernel_symbol_exists("vmcoreinfo_data") ||
+	    !kernel_symbol_exists("vmcoreinfo_size")) {
 		/*
-		 * GDB interface hasn't been initialised yet, so can't
-		 * access vmcoreinfo_data
+		 * GDB must be initialised and both vmcoreinfo symbols must
+		 * exist before accessing vmcoreinfo_data.
 		 */
 		return NULL;
 	}
